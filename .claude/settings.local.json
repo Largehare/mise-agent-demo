@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(ls -la /d/code/mise/*.md /d/code/mise/docker-compose*)",
-      "Bash(head -50 /d/code/mise/mise-api/src/migrations/versions/*.py)"
+      "Bash(head -50 /d/code/mise/mise-api/src/migrations/versions/*.py)",
+      "Bash(conda run:*)",
+      "Bash(grep -E \"\\\\.\\(py|sql\\)$\")"
     ]
   }
 }

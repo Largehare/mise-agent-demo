@@ -3,8 +3,6 @@
 import json
 import streamlit as st
 from agent.core import create_agent
-from langchain_core.chat_history import InMemoryChatMessageHistory
-from langchain_core.runnables.history import RunnableWithMessageHistory
 
 
 st.set_page_config(
@@ -16,21 +14,7 @@ st.set_page_config(
 
 @st.cache_resource
 def get_agent():
-    executor = create_agent()
-    store = {}
-
-    def get_session_history(session_id: str) -> InMemoryChatMessageHistory:
-        if session_id not in store:
-            store[session_id] = InMemoryChatMessageHistory()
-        return store[session_id]
-
-    agent_with_history = RunnableWithMessageHistory(
-        executor,
-        get_session_history,
-        input_messages_key="input",
-        history_messages_key="chat_history",
-    )
-    return agent_with_history
+    return create_agent()
 
 
 # ── Sidebar ──
