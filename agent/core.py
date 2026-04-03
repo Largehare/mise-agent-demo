@@ -33,7 +33,16 @@ class _AgentWrapper:
         )
 
         messages = result["messages"]
-        output = messages[-1].content if messages else ""
+        raw_content = messages[-1].content if messages else ""
+        # Claude sometimes returns a list of content blocks instead of a plain string
+        if isinstance(raw_content, list):
+            output = "".join(
+                block["text"]
+                for block in raw_content
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+        else:
+            output = raw_content
 
         # Build intermediate_steps from tool-call/tool-result pairs
         intermediate_steps = []

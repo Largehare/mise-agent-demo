@@ -286,7 +286,7 @@ def get_premise_details(premise_id: str) -> dict:
 
     services = [s for s in _SERVICES if s["premise_id"] == premise_id]
     staff = [
-        {"id": s["id"], "name": s["name"]}
+        {"id": s["id"], "name": s["name"], "rating": s["rating"]}
         for s in _STAFF if s["premise_id"] == premise_id
     ]
 

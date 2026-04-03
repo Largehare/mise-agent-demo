@@ -2,42 +2,70 @@
 
 import datetime
 import json
-import re
-
 import streamlit as st
 from agent.core import create_agent
+from db.fake_data import create_booking as db_create_booking
 
 
-# ── Form spec parser ──
-_FORM_MARKER_RE = re.compile(r'\[BOOKING_FORM:\s*(\{.*?\})\s*\]', re.DOTALL)
+def extract_form_from_steps(intermediate_steps: list) -> dict | None:
+    """Build a booking form spec from agent tool call results.
 
+    Scans intermediate_steps (most recent first) for a get_premise_details
+    call and an optional check_availability call. Returns a form spec dict
+    if sufficient data is found, otherwise None.
 
-def parse_form_spec(text: str) -> tuple[str, dict | None]:
-    """Extract a [BOOKING_FORM: {...}] marker from AI response text.
-
-    Returns (clean_text, spec_dict) where clean_text has the marker stripped.
-    Returns (text, None) if no valid marker is found.
+    Returns None if create_booking was called (booking already completed).
     """
-    match = _FORM_MARKER_RE.search(text)
-    if not match:
-        return text, None
-    try:
-        spec = json.loads(match.group(1))
-    except json.JSONDecodeError:
-        return text[:match.start()].rstrip(), None
-    return text[:match.start()].rstrip(), spec
+    # If a booking was just created, don't show the form again
+    if any(action.tool == "create_booking" for action, _ in intermediate_steps):
+        return None
+
+    premise_details = None
+    availability_data = None
+
+    for action, observation in reversed(intermediate_steps):
+        if action.tool == "get_premise_details" and premise_details is None:
+            try:
+                premise_details = json.loads(observation)
+            except (json.JSONDecodeError, TypeError):
+                continue
+        elif action.tool == "check_availability" and availability_data is None:
+            try:
+                availability_data = json.loads(observation)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    if not premise_details or "error" in premise_details:
+        return None
+
+    # Flatten availability slots for the form widget
+    slots = []
+    if isinstance(availability_data, list):
+        for entry in availability_data:
+            sid = entry.get("staff_id")
+            for slot in entry.get("available_slots", []):
+                slots.append({"staff_id": sid, "start": slot["start"], "end": slot["end"]})
+
+    return {
+        "premise_id": premise_details["id"],
+        "premise_name": premise_details["name"],
+        "services": premise_details["services"],
+        "staff": premise_details["staff"],
+        "slots": slots,
+    }
 
 
-def invoke_agent(prompt: str) -> tuple[str, list]:
-    """Invoke the agent and return (raw_response, tool_log_entries)."""
+def invoke_agent(prompt: str) -> tuple[str, list, list]:
+    """Invoke the agent and return (raw_response, tool_log_entries, intermediate_steps)."""
     agent = get_agent()
     result = agent.invoke(
         {"input": prompt},
         config={"configurable": {"session_id": "streamlit-session"}},
     )
     raw = result.get("output", "I encountered an issue. Please try again.")
+    steps = result.get("intermediate_steps", [])
     logs = []
-    for action, observation in result.get("intermediate_steps", []):
+    for action, observation in steps:
         logs.append({
             "tool": action.tool,
             "input": action.tool_input,
@@ -47,7 +75,7 @@ def invoke_agent(prompt: str) -> tuple[str, list]:
                 else str(observation)
             ),
         })
-    return raw, logs
+    return raw, logs, steps
 
 
 st.set_page_config(
@@ -126,13 +154,15 @@ if st.session_state.pending_booking_input:
     with st.chat_message("assistant"):
         with st.spinner("Searching database and generating response..."):
             try:
-                raw, logs = invoke_agent(booking_input)
+                raw, logs, steps = invoke_agent(booking_input)
                 st.session_state.tool_logs.extend(logs)
-                display_text, form_spec = parse_form_spec(raw)
+                form_spec = extract_form_from_steps(steps)
                 if form_spec:
                     st.session_state.pending_form = form_spec
-                st.markdown(display_text)
-                st.session_state.messages.append({"role": "assistant", "content": display_text})
+                st.markdown(raw)
+                st.session_state.messages.append({"role": "assistant", "content": raw})
+                if form_spec:
+                    st.rerun()
             except Exception as e:
                 error_msg = f"Error: {str(e)}"
                 st.error(error_msg)
@@ -196,6 +226,8 @@ if st.session_state.pending_form:
                 )
             except ValueError:
                 default_date = datetime.date.today()
+            if default_date < datetime.date.today():
+                default_date = datetime.date.today()
 
             selected_date = st.date_input(
                 "Date",
@@ -214,33 +246,31 @@ if st.session_state.pending_form:
             )
             selected_staff = staff_list[selected_staff_idx] if staff_list else None
 
+            # Build time options: real slots from availability check, or standard hours
             if slots and selected_staff:
                 staff_slots = [sl for sl in slots if sl["staff_id"] == selected_staff["id"]]
-                if staff_slots:
-                    slot_labels = [f"{sl['start']} – {sl['end']}" for sl in staff_slots]
-                    selected_slot_idx = st.selectbox(
-                        "Time",
-                        range(len(slot_labels)),
-                        format_func=lambda i: slot_labels[i],
-                        key="form_slot",
-                    )
-                    selected_slot = staff_slots[selected_slot_idx]
-                else:
-                    st.selectbox(
-                        "Time",
-                        ["No slots available for this staff member"],
-                        key="form_slot",
-                        disabled=True,
-                    )
-                    selected_slot = None
             else:
-                st.selectbox(
+                staff_slots = []
+
+            if staff_slots:
+                slot_labels = [f"{sl['start']} – {sl['end']}" for sl in staff_slots]
+                selected_slot_idx = st.selectbox(
                     "Time",
-                    ["Select a date first to see availability"],
+                    range(len(slot_labels)),
+                    format_func=lambda i: slot_labels[i],
                     key="form_slot",
-                    disabled=True,
                 )
-                selected_slot = None
+                selected_slot = {"start": staff_slots[selected_slot_idx]["start"]}
+            else:
+                # No availability data — show standard half-hour slots 8:00–18:00
+                standard_times = [
+                    f"{h:02d}:{m:02d}"
+                    for h in range(8, 19)
+                    for m in (0, 30)
+                    if not (h == 18 and m == 30)
+                ]
+                selected_time = st.selectbox("Time", standard_times, index=4, key="form_slot")
+                selected_slot = {"start": selected_time}
 
         submit_col, cancel_col, _ = st.columns([1, 1, 4])
         with submit_col:
@@ -256,16 +286,29 @@ if st.session_state.pending_form:
             if not selected_service or not selected_staff or not selected_slot:
                 st.warning("Please fill in all fields before confirming.")
             else:
-                booking_summary = (
-                    f"Please book {selected_service['name']} at {premise_name} "
-                    f"with {selected_staff['name']} on {selected_date.isoformat()} "
-                    f"at {selected_slot['start']}. "
-                    f"service_id={selected_service['id']}, "
-                    f"staff_id={selected_staff['id']}, "
-                    f"premise_id={spec['premise_id']}"
+                result = db_create_booking(
+                    staff_id=selected_staff['id'],
+                    service_id=selected_service['id'],
+                    premise_id=spec['premise_id'],
+                    date=selected_date.isoformat(),
+                    time=selected_slot['start'],
                 )
                 st.session_state.pending_form = None
-                st.session_state.pending_booking_input = booking_summary
+                if "error" in result:
+                    msg = f"Booking failed: {result['error']}"
+                else:
+                    msg = (
+                        f"**Booking Confirmed!**\n\n"
+                        f"**Booking ID:** {result['booking_id']}\n"
+                        f"**Service:** {result['service_name']}\n"
+                        f"**Staff:** {result['staff_name']}\n"
+                        f"**Date:** {result['date']}\n"
+                        f"**Time:** {result['time']}\n"
+                        f"**Price:** {result['price']}\n"
+                        f"**Status:** {result['status']}\n\n"
+                        f"{result['message']}"
+                    )
+                st.session_state.messages.append({"role": "assistant", "content": msg})
                 st.rerun()
 
 # ── Chat input (disabled while booking form is active) ──
@@ -282,13 +325,15 @@ if prompt := st.chat_input(
     with st.chat_message("assistant"):
         with st.spinner("Searching database and generating response..."):
             try:
-                raw, logs = invoke_agent(prompt)
+                raw, logs, steps = invoke_agent(prompt)
                 st.session_state.tool_logs.extend(logs)
-                display_text, form_spec = parse_form_spec(raw)
+                form_spec = extract_form_from_steps(steps)
                 if form_spec:
                     st.session_state.pending_form = form_spec
-                st.markdown(display_text)
-                st.session_state.messages.append({"role": "assistant", "content": display_text})
+                st.markdown(raw)
+                st.session_state.messages.append({"role": "assistant", "content": raw})
+                if form_spec:
+                    st.rerun()
             except Exception as e:
                 error_msg = f"Error: {str(e)}"
                 st.error(error_msg)
