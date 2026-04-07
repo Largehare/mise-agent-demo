@@ -76,6 +76,7 @@ def _build_graph() -> _AgentWrapper:
         anthropic_api_key=ANTHROPIC_API_KEY,
         temperature=0,
         max_tokens=MAX_TOKENS,
+        timeout=60,
     )
     graph = create_react_agent(
         llm,
